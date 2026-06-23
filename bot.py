@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import requests
 from bs4 import BeautifulSoup
@@ -9,8 +10,8 @@ from urllib.parse import urljoin, urlparse
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-
 CHECK_INTERVAL_SECONDS = 21600  # 6 hours
+SEEN_FILE = "seen_tenders.json"
 
 
 SOURCES = [
@@ -38,32 +39,58 @@ SOURCES = [
 
 
 LINK_KEYWORDS = [
-    "tender", "tenders", "rfp", "rfq", "procurement", "bid",
-    "bidding", "opportunity", "opportunities", "supplier", "vendors"
+    "tender", "tenders", "rfp", "rfq", "rfi", "eoi",
+    "procurement", "bid", "bidding", "opportunity",
+    "opportunities", "supplier", "vendors", "vendor",
+    "contract", "contracts", "quotation", "proposal"
 ]
 
 
-ARTNOVI_HIGH = [
-    "museum", "visitor center", "visitor centre", "immersive",
-    "interactive", "projection mapping", "multimedia", "experience center",
+DOCUMENT_EXTENSIONS = [
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx"
+]
+
+
+HIGH_PRIORITY = [
     "national day", "uae national day", "eid al etihad", "union day",
-    "opening ceremony", "closing ceremony", "show production",
-    "cultural festival", "heritage", "pavilion", "exhibition"
+    "opening ceremony", "closing ceremony", "inauguration ceremony",
+    "launch ceremony", "show production", "cultural show",
+    "heritage show", "immersive show", "projection show",
+    "multimedia show", "museum", "visitor center", "visitor centre",
+    "experience center", "experience centre", "immersive experience",
+    "interactive experience", "projection mapping", "3d mapping",
+    "pavilion", "exhibition", "heritage", "storytelling"
 ]
 
 
-ARTNOVI_MEDIUM = [
-    "event", "events", "festival", "ceremony", "launch event",
-    "audio visual", "av", "led", "led screen", "digital screen",
-    "digital signage", "content production", "creative services",
-    "animation", "cg", "hologram", "storytelling", "innovation", "future"
+MEDIUM_PRIORITY = [
+    "event", "events", "festival", "ceremony", "activation",
+    "audio visual", "audiovisual", "av", "led", "led screen",
+    "digital screen", "digital signage", "content production",
+    "creative services", "animation", "cg", "hologram",
+    "interactive", "immersive", "multimedia", "innovation",
+    "future", "visitor experience", "public art"
 ]
 
 
 NEGATIVE = [
     "cleaning", "pest control", "vehicle", "vehicles", "furniture",
     "construction", "maintenance", "security guard", "landscaping",
-    "catering", "uniform", "stationery", "insurance"
+    "catering", "uniform", "stationery", "insurance", "medical supplies",
+    "food supply", "facility management", "waste management"
+]
+
+
+DEADLINE_PATTERNS = [
+    r"(submission deadline[:\s]+.{0,40})",
+    r"(closing date[:\s]+.{0,40})",
+    r"(deadline[:\s]+.{0,40})",
+    r"(last date[:\s]+.{0,40})",
+    r"(bid closing[:\s]+.{0,40})",
+    r"(tender closing[:\s]+.{0,40})",
+    r"(\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4})",
+    r"(\d{1,2}/\d{1,2}/\d{4})",
+    r"(\d{4}-\d{2}-\d{2})",
 ]
 
 
@@ -72,41 +99,67 @@ def send_telegram(message):
         print("Telegram token or chat id is missing")
         return
 
-    requests.post(
-        f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data={
-            "chat_id": CHAT_ID,
-            "text": message,
-            "disable_web_page_preview": True
-        },
-        timeout=20
-    )
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={
+                "chat_id": CHAT_ID,
+                "text": message[:3900],
+                "disable_web_page_preview": True
+            },
+            timeout=20
+        )
+    except Exception as e:
+        print(f"Telegram error: {e}")
 
 
 def fetch(url):
     response = requests.get(
         url,
         timeout=25,
-        headers={"User-Agent": "Mozilla/5.0"}
+        headers={
+            "User-Agent": "Mozilla/5.0 ArtnoviTenderBot/2.0"
+        }
     )
     response.raise_for_status()
     return response.text
 
 
 def clean_text(text):
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
-def get_title(soup, fallback):
-    if soup.title and soup.title.string:
-        return clean_text(soup.title.string)[:160]
+def load_seen():
+    if not os.path.exists(SEEN_FILE):
+        return set()
 
-    h1 = soup.find("h1")
-    if h1:
-        return clean_text(h1.get_text())[:160]
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
 
-    return fallback
+
+def save_seen(seen):
+    try:
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(seen), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Could not save seen file: {e}")
+
+
+def is_document_link(url):
+    low = url.lower()
+    return any(low.endswith(ext) or ext + "?" in low for ext in DOCUMENT_EXTENSIONS)
+
+
+def looks_like_tender_link(url, text=""):
+    combined = f"{url} {text}".lower()
+
+    return (
+        any(word in combined for word in LINK_KEYWORDS)
+        or is_document_link(url)
+    )
 
 
 def extract_links(base_url, html):
@@ -114,29 +167,65 @@ def extract_links(base_url, html):
     links = set()
 
     for a in soup.find_all("a", href=True):
-        href = a["href"]
-        text = clean_text(a.get_text(" ")).lower()
+        href = a.get("href", "")
+        label = clean_text(a.get_text(" "))
         full_url = urljoin(base_url, href)
-        link_text = (href + " " + text).lower()
 
-        if any(word in link_text for word in LINK_KEYWORDS):
+        if not full_url.startswith("http"):
+            continue
+
+        if looks_like_tender_link(full_url, label):
             links.add(full_url)
 
-    return list(links)[:15]
+    return list(links)[:30]
 
 
-def make_description(text):
-    text = clean_text(text)
-    if len(text) > 700:
-        text = text[:700] + "..."
-    return text
+def get_title(soup, fallback):
+    h1 = soup.find("h1")
+    if h1 and clean_text(h1.get_text()):
+        return clean_text(h1.get_text())[:160]
+
+    if soup.title and soup.title.string:
+        return clean_text(soup.title.string)[:160]
+
+    return fallback[:160]
+
+
+def find_deadline(text):
+    low = text.lower()
+
+    for pattern in DEADLINE_PATTERNS:
+        match = re.search(pattern, low, flags=re.IGNORECASE)
+        if match:
+            return clean_text(match.group(1))[:120]
+
+    return "Not found"
+
+
+def classify_category(text):
+    low = text.lower()
+
+    if any(x in low for x in ["national day", "eid al etihad", "union day"]):
+        return "🇦🇪 NATIONAL DAY"
+    if any(x in low for x in ["opening ceremony", "closing ceremony", "inauguration"]):
+        return "🎭 CEREMONY / SHOW"
+    if any(x in low for x in ["museum", "visitor center", "visitor centre", "heritage"]):
+        return "🏛 MUSEUM / HERITAGE"
+    if any(x in low for x in ["immersive", "interactive", "experience center", "experience centre"]):
+        return "✨ IMMERSIVE / INTERACTIVE"
+    if any(x in low for x in ["led", "digital screen", "digital signage", "av", "audio visual"]):
+        return "📺 AV / LED / DIGITAL"
+    if any(x in low for x in ["event", "festival", "activation"]):
+        return "🎪 EVENT / FESTIVAL"
+
+    return "📌 GENERAL OPPORTUNITY"
 
 
 def score_tender(text):
     low = text.lower()
 
-    high_found = [w for w in ARTNOVI_HIGH if w in low]
-    medium_found = [w for w in ARTNOVI_MEDIUM if w in low]
+    high_found = [w for w in HIGH_PRIORITY if w in low]
+    medium_found = [w for w in MEDIUM_PRIORITY if w in low]
     negative_found = [w for w in NEGATIVE if w in low]
 
     score = 0
@@ -146,39 +235,65 @@ def score_tender(text):
 
     score = max(0, min(10, score))
 
-    if high_found:
+    if score >= 8:
         fit = "HIGH"
-    elif medium_found:
+    elif score >= 5:
         fit = "MEDIUM"
-    else:
+    elif score >= 3:
         fit = "LOW"
+    else:
+        fit = "VERY LOW"
 
     return score, fit, high_found, medium_found, negative_found
 
 
-def check_page(source_name, url):
-    try:
-        html = fetch(url)
-        soup = BeautifulSoup(html, "html.parser")
+def short_description(text):
+    text = clean_text(text)
 
-        page_title = get_title(soup, source_name)
-        page_text = soup.get_text(" ")
-        description = make_description(page_text)
-        score, fit, high, medium, negative = score_tender(page_text)
+    important_sentences = []
+    sentences = re.split(r"(?<=[.!?])\s+", text)
 
-        if score >= 3:
-            message = f"""🎯 Possible Tender / Opportunity for Artnovi
+    for sentence in sentences:
+        low = sentence.lower()
+        if any(w in low for w in HIGH_PRIORITY + MEDIUM_PRIORITY + LINK_KEYWORDS):
+            important_sentences.append(sentence)
 
-Source: {source_name}
+    if important_sentences:
+        result = " ".join(important_sentences[:3])
+    else:
+        result = text[:700]
+
+    return clean_text(result)[:700]
+
+
+def build_message(source_name, title, url, text):
+    score, fit, high, medium, negative = score_tender(text)
+    category = classify_category(text)
+    deadline = find_deadline(text)
+    description = short_description(text)
+
+    matched = high + medium
+    matched_text = ", ".join(matched[:12]) if matched else "No strong match"
+
+    message = f"""🎯 NEW TENDER / OPPORTUNITY
+
+Source:
+{source_name}
+
+Category:
+{category}
 
 Title:
-{page_title}
+{title}
 
-Fit Score:
+Artnovi Fit:
 {score}/10 — {fit}
 
+Deadline:
+{deadline}
+
 Why relevant:
-{", ".join((high + medium)[:12]) if (high or medium) else "General tender/procurement page"}
+{matched_text}
 
 Short description:
 {description}
@@ -186,37 +301,73 @@ Short description:
 Direct link:
 {url}
 """
+    return message, score
+
+
+def check_document_link(source_name, url, seen):
+    if url in seen:
+        return
+
+    fake_text = url.replace("-", " ").replace("_", " ").replace("/", " ")
+    title = url.split("/")[-1][:160] or source_name
+
+    message, score = build_message(source_name, title, url, fake_text)
+
+    if score >= 3:
+        send_telegram(message)
+        seen.add(url)
+
+
+def check_page(source_name, url, seen):
+    if url in seen:
+        return
+
+    if is_document_link(url):
+        check_document_link(source_name, url, seen)
+        return
+
+    try:
+        html = fetch(url)
+        soup = BeautifulSoup(html, "html.parser")
+
+        title = get_title(soup, source_name)
+        text = soup.get_text(" ")
+
+        message, score = build_message(source_name, title, url, text)
+
+        if score >= 3:
             send_telegram(message)
+            seen.add(url)
 
     except Exception as e:
-        send_telegram(f"⚠️ Error checking {source_name}: {e}")
+        print(f"Error checking page {url}: {e}")
 
 
-def check_source(source):
+def check_source(source, seen):
     try:
         html = fetch(source["url"])
         links = extract_links(source["url"], html)
 
-        check_page(source["name"], source["url"])
-
         for link in links:
-            parsed = urlparse(link)
-            if parsed.scheme in ["http", "https"]:
-                check_page(source["name"], link)
+            check_page(source["name"], link, seen)
 
-        print(f"Checked {source['name']} — {len(links)} links")
+        print(f"Checked {source['name']} — found {len(links)} possible links")
 
     except Exception as e:
-        send_telegram(f"⚠️ Source error {source['name']}: {e}")
+        print(f"Source error {source['name']}: {e}")
 
 
 def main():
-    send_telegram("🚀 Artnovi Tender Bot started. Checking UAE tender sources...")
+    send_telegram("🚀 Artnovi Tender Bot v2 started")
+
+    seen = load_seen()
 
     for source in SOURCES:
-        check_source(source)
+        check_source(source, seen)
 
-    send_telegram("✅ Tender check completed.")
+    save_seen(seen)
+
+    send_telegram("✅ Tender check completed")
 
 
 if __name__ == "__main__":
