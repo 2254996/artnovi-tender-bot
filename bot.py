@@ -1,4 +1,4 @@
-import os
+import time import os
 import requests
 from bs4 import BeautifulSoup
 
@@ -98,4 +98,6 @@ def main():
     send_telegram("✅ Проверка завершена.")
 
 if __name__ == "__main__":
-    main()
+    while True:
+        main()
+        time.sleep(21600)  # каждые 6 часов
