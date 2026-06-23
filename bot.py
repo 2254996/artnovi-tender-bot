@@ -73,7 +73,6 @@ KEYWORDS = [
     "bid",
     "opportunity"
 ]
-]
 
 SOURCES = [
       {
