@@ -65,7 +65,7 @@ HIGH_PRIORITY = [
 
 MEDIUM_PRIORITY = [
     "event", "events", "festival", "ceremony", "activation",
-    "audio visual", "audiovisual", "av", "led", "led screen",
+    "audio visual", "audiovisual", "led screen",
     "digital screen", "digital signage", "content production",
     "creative services", "animation", "cg", "hologram",
     "interactive", "immersive", "multimedia", "innovation",
