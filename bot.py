@@ -101,4 +101,4 @@ def main():
 if __name__ == "__main__":
     while True:
         main()
-        time.sleep(21600)  # каждые 6 часов
+        time.sleep(21600)  # каждые 6 часов 
