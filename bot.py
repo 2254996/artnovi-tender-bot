@@ -358,16 +358,26 @@ def check_source(source, seen):
 
 
 def main():
-    send_telegram("🚀 Artnovi Tender Bot v2 started")
+    send_telegram("🚀 Artnovi Tender Bot started. Checking UAE tender sources...")
 
     seen = load_seen()
+    total_checked = 0
+    total_seen_before = len(seen)
 
     for source in SOURCES:
+        before = len(seen)
         check_source(source, seen)
+        after = len(seen)
+        total_checked += max(0, after - before)
 
     save_seen(seen)
 
-    send_telegram("✅ Tender check completed")
+    send_telegram(
+        f"✅ Tender check completed.\n\n"
+        f"New sent/seen this run: {total_checked}\n"
+        f"Already seen before: {total_seen_before}\n"
+        f"Total seen now: {len(seen)}"
+    )
 
 
 if __name__ == "__main__":
